@@ -1,5 +1,6 @@
 //! Interactive terminal UI (ratatui): scroll, sort, filter, favourite, rescan.
 
+use crate::blocklist::Blocklist;
 use crate::favourites::Favourites;
 use crate::model::{Badge, ServerInfo};
 use crate::{classify, mode, scan};
@@ -29,6 +30,7 @@ enum Filter {
 struct App {
     servers: Vec<ServerInfo>,
     favs: Favourites,
+    blocked: Blocklist,
     sort: Sort,
     filter: Filter,
     status: String,
@@ -74,11 +76,16 @@ fn seed(favs: &Favourites) -> Vec<SocketAddrV4> {
     v
 }
 
-pub async fn run(servers: Vec<ServerInfo>, favs: Favourites) -> std::io::Result<()> {
+pub async fn run(
+    servers: Vec<ServerInfo>,
+    favs: Favourites,
+    blocked: Blocklist,
+) -> std::io::Result<()> {
     let mut app = App {
         status: format!("{} servers", servers.len()),
         servers,
         favs,
+        blocked,
         sort: Sort::Relevance,
         filter: Filter::All,
     };
@@ -124,6 +131,13 @@ pub async fn run(servers: Vec<ServerInfo>, favs: Favourites) -> std::io::Result<
                     app.status = format!("{} {}", if now { "★ favourited" } else { "☆ unfavourited" }, addr);
                 }
             }
+            KeyCode::Char('b') => {
+                if let Some(&i) = state.selected().and_then(|sel| view.get(sel)) {
+                    let addr = app.servers[i].addr;
+                    let now = app.blocked.toggle(addr);
+                    app.status = format!("{} {}", if now { "✗ blocked" } else { "✓ unblocked" }, addr);
+                }
+            }
             KeyCode::Char('r') => {
                 app.status = "Scanning… (please wait)".into();
                 let view = app.view();
@@ -154,10 +168,19 @@ fn ui(f: &mut Frame, app: &App, view: &[usize], state: &mut TableState) {
             Badge::OtherCsgo => Color::Yellow,
             Badge::NotCsgo => Color::DarkGray,
         };
-        let star = if app.favs.contains(&s.addr) { "★" } else { " " };
+        let is_blocked = app.blocked.contains(&s.addr);
+        // ✗ (couldn't connect) takes precedence over ★ (favourite): the blocklist is
+        // the more recent "this one is actually broken" signal.
+        let (marker, marker_color) = if is_blocked {
+            ("✗", Color::Red)
+        } else if app.favs.contains(&s.addr) {
+            ("★", Color::Yellow)
+        } else {
+            (" ", Color::Yellow)
+        };
         let cc = if s.country.is_empty() { "??" } else { &s.country };
         Row::new(vec![
-            Cell::from(star).style(Style::new().fg(Color::Yellow)),
+            Cell::from(marker).style(Style::new().fg(marker_color)),
             Cell::from(badge.label()),
             Cell::from(format!("{}ms", s.latency.as_millis())),
             Cell::from(format!("{}/{}", s.players, s.max_players)),
@@ -167,7 +190,7 @@ fn ui(f: &mut Frame, app: &App, view: &[usize], state: &mut TableState) {
             Cell::from(s.addr.to_string()),
             Cell::from(trunc(&s.name, 30)),
         ])
-        .style(Style::new().fg(color))
+        .style(row_style(color, is_blocked))
     });
 
     let widths = [
@@ -201,6 +224,7 @@ fn ui(f: &mut Frame, app: &App, view: &[usize], state: &mut TableState) {
     let help = Line::from(vec![
         "↑↓".bold(), " move  ".into(),
         "f".bold(), " favourite  ".into(),
+        "b".bold(), " block  ".into(),
         "s".bold(), format!(" sort:{sort}  ").into(),
         "m".bold(), format!(" filter:{filter}  ").into(),
         "r".bold(), " rescan  ".into(),
@@ -209,6 +233,30 @@ fn ui(f: &mut Frame, app: &App, view: &[usize], state: &mut TableState) {
     let footer = Paragraph::new(vec![help, Line::from(app.status.clone())])
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[1]);
+}
+
+/// Style for one table row.
+///
+/// `badge_color` is the per-badge colour (green = MATCH, cyan = 2023, …) already
+/// chosen by the caller. `is_blocked` is true for anti-favourited servers — the ones
+/// you couldn't connect to and want de-emphasised but still visible.
+///
+/// TODO(you): decide how a blocked row should look. The non-blocked case must stay
+/// `Style::new().fg(badge_color)` so normal rows are unchanged. For blocked rows,
+/// pick a treatment that says "ignore me" without hiding the badge signal entirely.
+/// Things you can reach for on a ratatui `Style`:
+///   .add_modifier(Modifier::DIM)          // fade the whole row
+///   .add_modifier(Modifier::CROSSED_OUT)  // strike-through (terminal-dependent)
+///   .fg(Color::DarkGray)                  // override colour, drops the badge hue
+/// Trade-off: DIM keeps the green/cyan badge hue (you still see it *was* a MATCH),
+/// while forcing DarkGray reads as "dead" but throws away that colour information.
+fn row_style(badge_color: Color, is_blocked: bool) -> Style {
+    if is_blocked {
+        // TODO(you): replace this placeholder with your chosen blocked-row treatment.
+        Style::new().fg(badge_color)
+    } else {
+        Style::new().fg(badge_color)
+    }
 }
 
 fn clamp(state: &mut TableState, len: usize) {

@@ -3,6 +3,7 @@
 //! Default: interactive TUI.   `--once`: print a static table and exit.
 
 mod a2s;
+mod blocklist;
 mod classify;
 mod favourites;
 mod geo;
@@ -12,6 +13,7 @@ mod scan;
 mod source;
 mod tui;
 
+use blocklist::Blocklist;
 use favourites::Favourites;
 use model::{Badge, ServerInfo};
 use std::net::SocketAddrV4;
@@ -21,6 +23,7 @@ async fn main() -> std::io::Result<()> {
     let once = std::env::args().any(|a| a == "--once");
 
     let favs = Favourites::load();
+    let blocked = Blocklist::load();
     let mut seed: Vec<SocketAddrV4> = favs.addrs();
     if let Ok(a) = scan::KNOWN_GOOD.parse() {
         seed.push(a);
@@ -30,14 +33,14 @@ async fn main() -> std::io::Result<()> {
     let servers = scan::scan(&seed).await;
 
     if once {
-        print_table(&servers, &favs);
+        print_table(&servers, &favs, &blocked);
         Ok(())
     } else {
-        tui::run(servers, favs).await
+        tui::run(servers, favs, blocked).await
     }
 }
 
-fn print_table(servers: &[ServerInfo], favs: &Favourites) {
+fn print_table(servers: &[ServerInfo], favs: &Favourites, blocked: &Blocklist) {
     println!(
         "{:<2}{:<6} {:>6} {:>6} {:<12} {:<3} {:<16} {}",
         "", "BADGE", "PING", "PLRS", "MODE", "CC", "MAP", "ADDR"
@@ -45,7 +48,13 @@ fn print_table(servers: &[ServerInfo], favs: &Favourites) {
     println!("{}", "-".repeat(96));
     for s in servers {
         let badge = classify::classify(s);
-        let star = if favs.contains(&s.addr) { "★ " } else { "  " };
+        let star = if blocked.contains(&s.addr) {
+            "✗ "
+        } else if favs.contains(&s.addr) {
+            "★ "
+        } else {
+            "  "
+        };
         println!(
             "{}{:<6} {:>4}ms {:>5} {:<12} {:<3} {:<16} {}",
             star,
